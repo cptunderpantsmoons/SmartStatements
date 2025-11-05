@@ -319,16 +319,53 @@ class WorkflowEngine:
             # Generate Excel code
             code_result = self.gemini_client.generate_excel_code(template_data, healed_data.to_dict())
             
-            # Write code to file
-            code_file = "generate_statements.py"
-            with open(code_file, 'w') as f:
+            # Save code to file for audit purposes
+            code_file = os.path.join(config.output_directory, "generate_statements.py")
+            with open(code_file, 'w', encoding='utf-8') as f:
                 f.write(code_result['code'])
             
-            # Execute code to generate Excel
-            import os
-            os.system(f"python {code_file}")
-            
+            # Execute code in a controlled environment
+            # Create a restricted namespace for execution
             output_path = os.path.join(config.output_directory, "2025_Final.xlsx")
+            
+            safe_globals = {
+                '__builtins__': {
+                    'print': print,
+                    'len': len,
+                    'range': range,
+                    'str': str,
+                    'int': int,
+                    'float': float,
+                    'dict': dict,
+                    'list': list,
+                    'tuple': tuple,
+                    'set': set,
+                    'bool': bool,
+                    'min': min,
+                    'max': max,
+                    'sum': sum,
+                    'round': round,
+                    'enumerate': enumerate,
+                    'zip': zip
+                },
+                'pd': pd,
+                'pandas': pd,
+                'os': type('os', (), {'path': os.path, 'makedirs': os.makedirs}),
+                'template_data': template_data,
+                'healed_data': healed_data,
+                'mapping_result': mapping_result,
+                'output_path': output_path,
+                'config': config
+            }
+            
+            try:
+                exec(code_result['code'], safe_globals)
+            except Exception as exec_error:
+                raise Exception(f"Code execution failed: {str(exec_error)}")
+            
+            # Verify output file was created
+            if not os.path.exists(output_path):
+                raise Exception(f"Expected output file not created: {output_path}")
             
             processing_steps.append({
                 "step": 5,
@@ -416,9 +453,15 @@ class WorkflowEngine:
                 hash_sha256.update(chunk)
         return hash_sha256.hexdigest()
     
-    def start_file_monitoring(self):
+    def start_file_monitoring(self, default_user_id: str = "system"):
         """Start automatic file monitoring for zero-touch processing"""
-        self.file_monitor.start_monitoring(self.process_file)
+        def monitoring_callback(file_path: str, file_info: Dict):
+            """Wrapper callback for file monitoring that adapts signatures"""
+            user_id = file_info.get('user_id', default_user_id)
+            year = file_info.get('year', 2025)
+            self.process_file(file_path, user_id, year)
+        
+        self.file_monitor.start_monitoring(monitoring_callback)
     
     def stop_file_monitoring(self):
         """Stop file monitoring"""

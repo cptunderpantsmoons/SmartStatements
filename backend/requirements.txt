@@ -25,6 +25,9 @@ sqlalchemy>=2.0.0
 # Web Framework (for Vercel serverless)
 flask>=2.3.0
 vercel>=0.1.0
+Flask-Limiter>=3.5.0
+flask-cors>=4.0.0
+pydantic>=2.0.0
 
 # Monitoring & Metrics
 prometheus-client>=0.17.0
@@ -33,7 +36,6 @@ prometheus-client>=0.17.0
 watchdog>=3.0.0
 
 # Email/Notifications
-smtplib  # Built-in
 email-validator>=2.0.0
 
 # Utilities
@@ -51,15 +53,12 @@ python-dateutil>=2.8.0
 # JSON Schema validation
 jsonschema>=4.17.0
 
-# Async support
-asyncio  # Built-in
-concurrent.futures  # Built-in
-
-# Development/Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
-black>=23.0.0
-flake8>=6.0.0
+# Development/Testing (optional, only for development)
+# Uncomment if running tests locally
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0
 
 # Security
 cryptography>=41.0.0

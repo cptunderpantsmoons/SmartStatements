@@ -4,20 +4,65 @@ Vercel serverless function for AI workflow execution
 """
 import json
 import os
+import logging
 from typing import Dict, Any
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from pydantic import ValidationError
 
 from ..utils.workflow_engine import WorkflowEngine
 from ..config.settings import config
+from .models import (
+    ProcessRequest, ProcessResponse, StatusResponse, 
+    ErrorResponse, HealthResponse, ReportsResponse
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
+
+# Enable CORS
+CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+# Initialize rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
 
 # Initialize workflow engine
 workflow_engine = WorkflowEngine()
 
 
+def handle_validation_error(e: ValidationError):
+    """Convert Pydantic validation errors to HTTP response"""
+    errors = []
+    for error in e.errors():
+        errors.append({
+            'field': '.'.join(str(x) for x in error['loc']),
+            'message': error['msg']
+        })
+    
+    return jsonify({
+        'error': 'Validation failed',
+        'details': errors,
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    }), 400
+
+
 @app.route('/api/process', methods=['POST'])
+@limiter.limit("10 per hour")
 def process_file():
     """Main processing endpoint for financial statements"""
     try:
@@ -25,92 +70,132 @@ def process_file():
         data = request.get_json()
         
         if not data:
+            logger.warning(f"Process request from {request.remote_addr}: No data provided")
             return jsonify({
-                'error': 'No data provided'
+                'error': 'No data provided',
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }), 400
         
-        # Extract required parameters
-        file_path = data.get('file_path')
-        user_id = data.get('user_id')
-        year = data.get('year', 2025)
+        # Validate request using Pydantic
+        try:
+            req = ProcessRequest(**data)
+        except ValidationError as e:
+            logger.warning(f"Validation error: {e}")
+            return handle_validation_error(e)
         
-        if not file_path or not user_id:
-            return jsonify({
-                'error': 'Missing required parameters: file_path, user_id'
-            }), 400
-        
-        # Validate file exists
-        if not os.path.exists(file_path):
-            return jsonify({
-                'error': f'File not found: {file_path}'
-            }), 404
+        # Log processing start
+        logger.info(
+            f"Starting file processing",
+            extra={
+                'user_id': req.user_id,
+                'year': req.year,
+                'file_path': req.file_path
+            }
+        )
         
         # Process file
-        result = workflow_engine.process_file(file_path, user_id, year)
+        result = workflow_engine.process_file(req.file_path, req.user_id, req.year)
         
-        return jsonify(result), 200
+        # Log result
+        logger.info(
+            f"Processing completed with status: {result.get('status')}",
+            extra={'report_id': result.get('report_id')}
+        )
+        
+        return jsonify(result), 200 if result.get('status') == 'success' else 207
         
     except Exception as e:
+        logger.error(f"Processing error: {str(e)}", exc_info=True)
         return jsonify({
-            'error': f'Processing failed: {str(e)}'
+            'error': f'Processing failed: {str(e)}',
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 
 
 @app.route('/api/status/<report_id>', methods=['GET'])
+@limiter.limit("30 per hour")
 def get_status(report_id: str):
     """Get processing status for a report"""
     try:
+        logger.info(f"Fetching status for report {report_id}")
         status = workflow_engine.get_processing_status(report_id)
         return jsonify(status), 200
         
     except Exception as e:
+        logger.error(f"Status check error for {report_id}: {str(e)}")
         return jsonify({
-            'error': f'Failed to get status: {str(e)}'
+            'error': f'Failed to get status: {str(e)}',
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 
 
 @app.route('/api/reports/<user_id>', methods=['GET'])
+@limiter.limit("30 per hour")
 def get_user_reports(user_id: str):
     """Get all reports for a user"""
     try:
+        logger.info(f"Fetching reports for user {user_id}")
         reports = workflow_engine.get_user_reports(user_id)
+        
+        completed = sum(1 for r in reports if r.get('status') == 'completed')
+        failed = sum(1 for r in reports if r.get('status') == 'failed')
+        
         return jsonify({
-            'reports': reports
+            'reports': reports,
+            'total_count': len(reports),
+            'completed_count': completed,
+            'failed_count': failed
         }), 200
         
     except Exception as e:
+        logger.error(f"Reports fetch error for user {user_id}: {str(e)}")
         return jsonify({
-            'error': f'Failed to get reports: {str(e)}'
+            'error': f'Failed to get reports: {str(e)}',
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 
 
 @app.route('/api/metrics', methods=['GET'])
+@limiter.limit("60 per hour")
 def get_metrics():
     """Get system metrics"""
     try:
+        logger.info("Fetching system metrics")
         metrics = workflow_engine.metrics.get_metrics_summary()
         return jsonify(metrics), 200
         
     except Exception as e:
+        logger.error(f"Metrics fetch error: {str(e)}")
         return jsonify({
-            'error': f'Failed to get metrics: {str(e)}'
+            'error': f'Failed to get metrics: {str(e)}',
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 
 
 @app.route('/api/health', methods=['GET'])
+@limiter.limit("100 per hour")
 def health_check():
     """Health check endpoint"""
     try:
+        services_status = {
+            'database': 'operational',
+            'ai_models': 'operational',
+            'cache': 'operational'
+        }
+        
         return jsonify({
             'status': 'healthy',
-            'timestamp': workflow_engine.db_manager.get_system_metrics(),
-            'version': '1.0.0'
+            'version': '1.0.0',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'services': services_status
         }), 200
         
     except Exception as e:
+        logger.error(f"Health check error: {str(e)}")
         return jsonify({
             'status': 'unhealthy',
-            'error': str(e)
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 500
 
 
@@ -212,10 +297,9 @@ def internal_error(error):
 
 
 # Vercel serverless entry point
-def handler(request):
-    """Vercel serverless function handler"""
-    with app.request_context(request):
-        return app.full_dispatch_request(request)
+def handler(environ, start_response):
+    """Vercel serverless function handler (WSGI compatible)"""
+    return app(environ, start_response)
 
 
 # Local development

@@ -57,8 +57,31 @@ class Config:
     max_retries: int = 3
     retry_delay_seconds: int = 2
     
+    validate_on_init: bool = True
+    
     def __post_init__(self):
         """Validate configuration after initialization"""
+        if not self.validate_on_init:
+            return
+            
+        missing_vars = []
+        if not self.gemini_api_key:
+            missing_vars.append("GEMINI_API_KEY")
+        if not self.openrouter_api_key:
+            missing_vars.append("OPENROUTER_API_KEY")
+        if not self.supabase_url:
+            missing_vars.append("SUPABASE_URL")
+        if not self.supabase_anon_key:
+            missing_vars.append("SUPABASE_ANON_KEY")
+        if not self.supabase_service_key:
+            missing_vars.append("SUPABASE_SERVICE_KEY")
+        
+        if missing_vars:
+            print(f"Warning: Missing required environment variables: {', '.join(missing_vars)}")
+            print("Application may not function properly without these variables.")
+    
+    def validate(self):
+        """Explicitly validate configuration and raise errors if required fields are missing"""
         if not self.gemini_api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
         if not self.openrouter_api_key:

@@ -1,188 +1,314 @@
--- AI Financial Statement Generation System Database Schema
--- Supabase PostgreSQL Schema
+-- AI Financial Statement Generation System - Database Schema
+-- Execute this in Supabase SQL Editor to set up the database
 
--- Enable UUID extension
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- ============================================
+-- Enable Extensions
+-- ============================================
+create extension if not exists "uuid-ossp";
+create extension if not exists "pgcrypto";
 
--- Reports table: Store processed data, edits, and metadata
-CREATE TABLE reports (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
-  year INTEGER DEFAULT 2025,
-  status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'processing', 'ready', 'finalized', 'error')),
-  raw_data JSONB,  -- Healed/mapped DataFrame as JSON
-  edited_data JSONB,  -- Post-edit changes
-  mapping JSONB,  -- Semantic mapping output
-  qa_report JSONB,  -- Grok audit results
-  file_path TEXT,  -- Original file path
-  file_type TEXT,  -- 'pdf' or 'excel'
-  processing_log JSONB,  -- Step-by-step processing log
-  error_message TEXT,  -- Error details if status is 'error'
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- ============================================
+-- Reports Table
+-- ============================================
+create table if not exists reports (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null,
+  year integer not null check (year >= 2000 and year <= 2100),
+  status text not null check (status in ('processing', 'completed', 'failed', 'review')),
+  file_path text not null,
+  file_type text not null,
+  overall_score numeric(5, 2),
+  
+  -- Processing details
+  raw_data jsonb,
+  healing_result jsonb,
+  mapping_result jsonb,
+  qa_report jsonb,
+  certificate_data jsonb,
+  
+  -- Tracking
+  processing_log text[],
+  error_message text,
+  
+  -- Timestamps
+  created_at timestamp with time zone default now(),
+  updated_at timestamp with time zone default now(),
+  completed_at timestamp with time zone,
+  
+  -- Relationships
+  constraint fk_reports_user foreign key (user_id) references auth.users(id) on delete cascade
 );
 
--- Create indexes for reports table
-CREATE INDEX idx_reports_user ON reports(user_id);
-CREATE INDEX idx_reports_status ON reports(status);
-CREATE INDEX idx_reports_year ON reports(year);
-CREATE INDEX idx_reports_created_at ON reports(created_at);
+-- Create indexes for common queries
+create index idx_reports_user_id on reports(user_id);
+create index idx_reports_status on reports(status);
+create index idx_reports_year on reports(year);
+create index idx_reports_created_at on reports(created_at);
+create index idx_reports_user_status on reports(user_id, status);
 
--- Verification table: Steps + math proofs for audit trail
-CREATE TABLE verifications (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  report_id UUID REFERENCES reports(id) ON DELETE CASCADE,
-  steps JSONB,  -- Array: [{"step": 1, "model": "gemini-2.5-pro", "input_hash": "...", "output_summary": "...", "latency_seconds": 1.23}]
-  math_proofs JSONB,  -- e.g., {"trial_balance": "∑Debits=12345.67 == ∑Credits=12345.67", "ratios": {"current": "Assets/Liabilities=2.1"}}
-  cert_hash TEXT,  -- SHA256 of certificate PDF
-  cert_file_path TEXT,  -- Path to generated certificate
-  overall_score DECIMAL(5,2),  -- Overall confidence score
-  compliance_status TEXT,  -- 'PASS', 'FAIL', 'REVIEW'
-  signed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- Enable RLS (Row Level Security)
+alter table reports enable row level security;
+
+-- RLS Policy: Users can only see their own reports
+create policy "Users can view their own reports" on reports
+  for select using (auth.uid() = user_id);
+
+create policy "Users can insert their own reports" on reports
+  for insert with check (auth.uid() = user_id);
+
+create policy "Users can update their own reports" on reports
+  for update using (auth.uid() = user_id);
+
+create policy "Users can delete their own reports" on reports
+  for delete using (auth.uid() = user_id);
+
+-- ============================================
+-- AI Requests Cache Table (for logging)
+-- ============================================
+create table if not exists ai_requests (
+  id uuid primary key default uuid_generate_v4(),
+  report_id uuid,
+  user_id uuid not null,
+  
+  -- Request details
+  model_name text not null,
+  operation_type text not null,
+  input_hash text,
+  
+  -- Response details
+  token_count integer,
+  cost_usd numeric(10, 4),
+  latency_seconds numeric(8, 3),
+  
+  -- Status
+  status text not null check (status in ('success', 'error')),
+  error_message text,
+  
+  -- Timestamps
+  created_at timestamp with time zone default now(),
+  expires_at timestamp with time zone,
+  
+  constraint fk_ai_requests_report foreign key (report_id) references reports(id) on delete set null,
+  constraint fk_ai_requests_user foreign key (user_id) references auth.users(id) on delete cascade
 );
 
--- Create indexes for verifications table
-CREATE INDEX idx_verifications_report ON verifications(report_id);
-CREATE INDEX idx_verifications_compliance ON verifications(compliance_status);
+create index idx_ai_requests_user_id on ai_requests(user_id);
+create index idx_ai_requests_report_id on ai_requests(report_id);
+create index idx_ai_requests_created_at on ai_requests(created_at);
+create index idx_ai_requests_model on ai_requests(model_name);
 
--- Cache table: For AI model response caching
-CREATE TABLE ai_cache (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  input_hash TEXT UNIQUE NOT NULL,  -- SHA256 hash of input
-  model_name TEXT NOT NULL,  -- 'gemini-2.5-pro', 'gemini-2.5-flash', 'grok-4-fast'
-  response JSONB NOT NULL,  -- Cached response
-  token_count INTEGER,  -- Number of tokens used
-  cost_usd DECIMAL(10,4),  -- Cost in USD
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  expires_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()  -- TTL for cache entry
+alter table ai_requests enable row level security;
+
+create policy "Users can view their own AI requests" on ai_requests
+  for select using (auth.uid() = user_id);
+
+-- ============================================
+-- Processing Steps Table (audit trail)
+-- ============================================
+create table if not exists processing_steps (
+  id uuid primary key default uuid_generate_v4(),
+  report_id uuid not null,
+  
+  -- Step details
+  step_number integer not null,
+  step_name text not null,
+  model_used text,
+  
+  -- I/O hashing
+  input_hash text,
+  output_hash text,
+  
+  -- Performance
+  latency_seconds numeric(8, 3),
+  
+  -- Timestamps
+  created_at timestamp with time zone default now(),
+  
+  constraint fk_processing_steps_report foreign key (report_id) references reports(id) on delete cascade
 );
 
--- Create indexes for cache table
-CREATE INDEX idx_ai_cache_hash ON ai_cache(input_hash);
-CREATE INDEX idx_ai_cache_model ON ai_cache(model_name);
-CREATE INDEX idx_ai_cache_expires ON ai_cache(expires_at);
+create index idx_processing_steps_report_id on processing_steps(report_id);
+create index idx_processing_steps_step_number on processing_steps(report_id, step_number);
 
--- Metrics table: For monitoring and analytics
-CREATE TABLE metrics (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  report_id UUID REFERENCES reports(id) ON DELETE CASCADE,
-  model_name TEXT NOT NULL,
-  operation_type TEXT NOT NULL,  -- 'extraction', 'mapping', 'generation', 'audit'
-  latency_seconds DECIMAL(8,3),
-  token_count INTEGER,
-  cost_usd DECIMAL(10,4),
-  success BOOLEAN DEFAULT true,
-  error_message TEXT,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- ============================================
+-- Account Mappings Table
+-- ============================================
+create table if not exists account_mappings (
+  id uuid primary key default uuid_generate_v4(),
+  report_id uuid not null,
+  
+  -- Mapping details
+  account_2025 text not null,
+  account_2024_match text not null,
+  similarity_score numeric(3, 2),
+  action text not null check (action in ('AUTO_MAP', 'REVIEW_NEEDED', 'NEW_ACCOUNT')),
+  confidence numeric(3, 2),
+  
+  -- Synonyms and reasoning
+  synonyms_used text[],
+  reasoning text,
+  
+  -- Audit
+  created_at timestamp with time zone default now(),
+  
+  constraint fk_account_mappings_report foreign key (report_id) references reports(id) on delete cascade
 );
 
--- Create indexes for metrics table
-CREATE INDEX idx_metrics_report ON metrics(report_id);
-CREATE INDEX idx_metrics_model ON metrics(model_name);
-CREATE INDEX idx_metrics_operation ON metrics(operation_type);
-CREATE INDEX idx_metrics_created_at ON metrics(created_at);
+create index idx_account_mappings_report_id on account_mappings(report_id);
+create index idx_account_mappings_action on account_mappings(action);
 
--- User preferences table
-CREATE TABLE user_preferences (
-  id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
-  default_format JSONB,  -- Default formatting preferences
-  notification_settings JSONB,  -- Email/push notification preferences
-  auto_save BOOLEAN DEFAULT true,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- ============================================
+-- Files Table (for tracking uploaded files)
+-- ============================================
+create table if not exists files (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null,
+  report_id uuid,
+  
+  -- File info
+  file_name text not null,
+  file_path text not null,
+  file_type text not null,
+  file_size_bytes integer,
+  
+  -- Tracking
+  uploaded_at timestamp with time zone default now(),
+  processed_at timestamp with time zone,
+  
+  constraint fk_files_user foreign key (user_id) references auth.users(id) on delete cascade,
+  constraint fk_files_report foreign key (report_id) references reports(id) on delete set null
 );
 
--- Create unique index for user preferences
-CREATE UNIQUE INDEX idx_user_preferences_user ON user_preferences(user_id);
+create index idx_files_user_id on files(user_id);
+create index idx_files_report_id on files(report_id);
+create index idx_files_uploaded_at on files(uploaded_at);
 
--- Enable Row Level Security
-ALTER TABLE reports ENABLE ROW LEVEL SECURITY;
-ALTER TABLE verifications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
+alter table files enable row level security;
 
--- RLS Policies for reports table
-CREATE POLICY "Users can view own reports" ON reports FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY "Users can insert own reports" ON reports FOR INSERT WITH CHECK (auth.uid() = user_id);
-CREATE POLICY "Users can update own reports" ON reports FOR UPDATE USING (auth.uid() = user_id);
-CREATE POLICY "Users can delete own reports" ON reports FOR DELETE USING (auth.uid() = user_id);
+create policy "Users can view their own files" on files
+  for select using (auth.uid() = user_id);
 
--- RLS Policies for verifications table
-CREATE POLICY "Users can view own verifications" ON verifications FOR SELECT USING (
-  auth.uid() = (SELECT user_id FROM reports WHERE id = report_id)
+-- ============================================
+-- System Metrics Table
+-- ============================================
+create table if not exists system_metrics (
+  id uuid primary key default uuid_generate_v4(),
+  
+  -- Metrics
+  total_reports integer,
+  total_cost_usd numeric(12, 2),
+  total_tokens_used integer,
+  
+  -- Counts by status
+  processing_count integer default 0,
+  completed_count integer default 0,
+  failed_count integer default 0,
+  review_count integer default 0,
+  
+  -- Performance
+  avg_processing_time_seconds numeric(8, 2),
+  median_processing_time_seconds numeric(8, 2),
+  
+  -- Cache metrics
+  cache_hits integer default 0,
+  cache_misses integer default 0,
+  
+  -- Timestamps
+  recorded_at timestamp with time zone default now()
 );
-CREATE POLICY "Users can insert own verifications" ON verifications FOR INSERT WITH CHECK (
-  auth.uid() = (SELECT user_id FROM reports WHERE id = report_id)
+
+create index idx_system_metrics_recorded_at on system_metrics(recorded_at);
+
+-- ============================================
+-- Audit Log Table (for compliance)
+-- ============================================
+create table if not exists audit_logs (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid,
+  
+  -- Action details
+  action text not null,
+  resource_type text,
+  resource_id uuid,
+  
+  -- Changes
+  changes jsonb,
+  
+  -- Timestamps
+  created_at timestamp with time zone default now(),
+  ip_address inet
 );
 
--- RLS Policies for user_preferences table
-CREATE POLICY "Users can manage own preferences" ON user_preferences FOR ALL USING (auth.uid() = user_id);
+create index idx_audit_logs_user_id on audit_logs(user_id);
+create index idx_audit_logs_created_at on audit_logs(created_at);
+create index idx_audit_logs_resource on audit_logs(resource_type, resource_id);
 
--- Functions for automatic timestamp updates
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ language 'plpgsql';
+-- ============================================
+-- Views for Common Queries
+-- ============================================
 
--- Create triggers for updated_at
-CREATE TRIGGER update_reports_updated_at BEFORE UPDATE ON reports
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+-- View: User report summary
+create or replace view report_summary as
+select 
+  r.user_id,
+  r.year,
+  count(*) as total_reports,
+  count(case when r.status = 'completed' then 1 end) as completed_count,
+  count(case when r.status = 'processing' then 1 end) as processing_count,
+  count(case when r.status = 'failed' then 1 end) as failed_count,
+  count(case when r.status = 'review' then 1 end) as review_count,
+  avg(extract(epoch from (r.updated_at - r.created_at))) as avg_processing_seconds,
+  avg(r.overall_score) as avg_score
+from reports r
+group by r.user_id, r.year;
 
-CREATE TRIGGER update_user_preferences_updated_at BEFORE UPDATE ON user_preferences
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+-- View: AI usage summary
+create or replace view ai_usage_summary as
+select 
+  model_name,
+  operation_type,
+  count(*) as request_count,
+  sum(token_count) as total_tokens,
+  sum(cost_usd) as total_cost,
+  avg(latency_seconds) as avg_latency,
+  count(case when status = 'error' then 1 end) as error_count,
+  date(created_at) as date
+from ai_requests
+group by model_name, operation_type, date(created_at);
 
--- Function to clean expired cache entries
-CREATE OR REPLACE FUNCTION clean_expired_cache()
-RETURNS void AS $$
-BEGIN
-    DELETE FROM ai_cache WHERE expires_at < NOW();
-END;
-$$ LANGUAGE plpgsql;
+-- ============================================
+-- Triggers for Audit Trail
+-- ============================================
 
--- Views for common queries
-CREATE VIEW user_reports_summary AS
-SELECT 
-    r.id,
-    r.user_id,
-    r.year,
-    r.status,
-    r.file_type,
-    r.created_at,
-    r.updated_at,
-    v.compliance_status,
-    v.overall_score
-FROM reports r
-LEFT JOIN verifications v ON r.id = v.report_id;
+-- Trigger: Auto-update updated_at timestamp
+create or replace function update_updated_at_column()
+returns trigger as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$ language plpgsql;
 
-CREATE VIEW system_metrics AS
-SELECT 
-    model_name,
-    operation_type,
-    COUNT(*) as total_requests,
-    AVG(latency_seconds) as avg_latency,
-    SUM(token_count) as total_tokens,
-    SUM(cost_usd) as total_cost,
-    COUNT(*) FILTER (WHERE success = true) as success_count,
-    COUNT(*) FILTER (WHERE success = false) as error_count
-FROM metrics
-WHERE created_at >= NOW() - INTERVAL '24 hours'
-GROUP BY model_name, operation_type;
+create trigger update_reports_updated_at before update on reports
+  for each row execute function update_updated_at_column();
 
--- Grant permissions to authenticated users
-GRANT SELECT, INSERT, UPDATE, DELETE ON reports TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON verifications TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON user_preferences TO authenticated;
-GRANT SELECT ON user_reports_summary TO authenticated;
-GRANT SELECT ON system_metrics TO authenticated;
-
--- Grant permissions to service role for backend operations
-GRANT ALL ON reports TO service_role;
-GRANT ALL ON verifications TO service_role;
-GRANT ALL ON ai_cache TO service_role;
-GRANT ALL ON metrics TO service_role;
-GRANT ALL ON user_preferences TO service_role;
-GRANT ALL ON user_reports_summary TO service_role;
-GRANT ALL ON system_metrics TO service_role;
+-- ============================================
+-- Supabase Storage Setup Instructions
+-- ============================================
+-- Run these commands in Supabase dashboard to create storage buckets:
+-- 
+-- 1. Create 'uploads' bucket (private):
+--    - Go to Storage > New bucket
+--    - Name: uploads
+--    - Uncheck "Public bucket"
+--    - Create bucket
+--
+-- 2. Create 'outputs' bucket (public):
+--    - Go to Storage > New bucket
+--    - Name: outputs
+--    - Check "Public bucket"
+--    - Create bucket
+--
+-- 3. Set RLS policies on buckets:
+--    - For uploads: Allow authenticated users to upload/read their own files
+--    - For outputs: Allow public read, authenticated write
