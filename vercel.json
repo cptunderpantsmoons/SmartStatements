@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "backend/api/process.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/backend/api/process.py"
+    }
+  ],
+  "env": {
+    "GEMINI_API_KEY": "@gemini-api-key",
+    "OPENROUTER_API_KEY": "@openrouter-api-key",
+    "SUPABASE_URL": "@supabase-url",
+    "SUPABASE_ANON_KEY": "@supabase-anon-key",
+    "SUPABASE_SERVICE_KEY": "@supabase-service-key",
+    "SMTP_SERVER": "@smtp-server",
+    "SMTP_USERNAME": "@smtp-username",
+    "SMTP_PASSWORD": "@smtp-password",
+    "ALERT_EMAIL": "@alert-email"
+  },
+  "functions": {
+    "backend/api/process.py": {
+      "runtime": "python3.9"
+    }
+  },
+  "installCommand": "pip install -r backend/requirements.txt",
+  "framework": null
+}

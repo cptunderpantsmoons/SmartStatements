@@ -1,0 +1,65 @@
+# AI Financial Statement Generation System - Backend Dependencies
+
+# Core AI/ML Libraries
+google-generativeai>=0.3.0
+openai>=1.0.0  # For OpenRouter API
+
+# Data Processing
+pandas>=2.0.0
+numpy>=1.24.0
+openpyxl>=3.1.0
+
+# PDF Processing
+pdf2image>=1.16.0
+PyMuPDF>=1.23.0  # Alternative PDF processing
+pytesseract>=0.3.10
+
+# Image Processing
+Pillow>=10.0.0
+
+# Database
+supabase>=1.0.0
+psycopg2-binary>=2.9.0
+sqlalchemy>=2.0.0
+
+# Web Framework (for Vercel serverless)
+flask>=2.3.0
+vercel>=0.1.0
+
+# Monitoring & Metrics
+prometheus-client>=0.17.0
+
+# File Monitoring
+watchdog>=3.0.0
+
+# Email/Notifications
+smtplib  # Built-in
+email-validator>=2.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+aiohttp>=3.8.0
+
+# PDF Generation for certificates
+reportlab>=4.0.0
+fpdf2>=2.7.0
+
+# Date/Time handling
+python-dateutil>=2.8.0
+
+# JSON Schema validation
+jsonschema>=4.17.0
+
+# Async support
+asyncio  # Built-in
+concurrent.futures  # Built-in
+
+# Development/Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Security
+cryptography>=41.0.0
